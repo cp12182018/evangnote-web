@@ -38,3 +38,22 @@ export function deleteContacts(ids) {
 export function deleteAllContacts() {
   localStorage.removeItem(KEY);
 }
+
+// Returns how many were actually added (skips duplicates by phone or name)
+export function bulkAddContacts(newContacts) {
+  const contacts = getContacts();
+  let addedCount = 0;
+  for (const c of newContacts) {
+    const isDup = contacts.some(existing => {
+      if (c.phone && c.phone !== 'No Phone' && existing.phone === c.phone) return true;
+      if (existing.name.toLowerCase() === c.name.toLowerCase()) return true;
+      return false;
+    });
+    if (!isDup) {
+      contacts.unshift(c);
+      addedCount++;
+    }
+  }
+  save(contacts);
+  return addedCount;
+}

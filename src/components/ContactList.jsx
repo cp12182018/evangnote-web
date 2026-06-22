@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { getContacts, deleteContacts, deleteAllContacts } from '../utils/storage'
+import { getContacts, deleteContacts, deleteAllContacts, bulkAddContacts } from '../utils/storage'
 
 const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000
 
@@ -34,6 +34,8 @@ export default function ContactList() {
   const [selected, setSelected] = useState(new Set())
   const [confirm, setConfirm] = useState(null) // { type: 'selected' | 'all' }
   const [menuOpen, setMenuOpen] = useState(false)
+  const [syncing, setSyncing] = useState(false)
+  const [syncToast, setSyncToast] = useState(null) // { msg, type: 'success'|'error' }
   const menuRef = useRef(null)
   const navigate = useNavigate()
 
@@ -79,6 +81,45 @@ export default function ContactList() {
     setSelected(new Set())
   }
 
+  function showToast(msg, type = 'success') {
+    setSyncToast({ msg, type })
+    setTimeout(() => setSyncToast(null), 3500)
+  }
+
+  async function syncFromContacts() {
+    if (!('contacts' in navigator && 'ContactsManager' in window)) {
+      showToast('Open in iPhone Safari to use Sync', 'error')
+      return
+    }
+    setSyncing(true)
+    try {
+      const picked = await navigator.contacts.select(['name', 'tel'], { multiple: true })
+      if (!picked || picked.length === 0) { setSyncing(false); return }
+      const toAdd = picked
+        .map(p => ({
+          id: crypto.randomUUID(),
+          name: (p.name?.[0] || '').trim(),
+          phone: p.tel?.[0]?.trim() || 'No Phone',
+          birthday: null,
+          dateAdded: new Date().toISOString(),
+          lastContacted: null,
+          latestReply: '',
+          notes: '',
+        }))
+        .filter(c => c.name.length > 0)
+      const added = bulkAddContacts(toAdd)
+      const skipped = toAdd.length - added
+      load()
+      if (added === 0) showToast(`All ${skipped} already in CRM`, 'error')
+      else if (skipped === 0) showToast(`✓ ${added} contact${added !== 1 ? 's' : ''} added`)
+      else showToast(`✓ ${added} added · ${skipped} already existed`)
+    } catch (e) {
+      if (e.name !== 'AbortError') showToast('Sync failed. Try again.', 'error')
+    } finally {
+      setSyncing(false)
+    }
+  }
+
   function confirmDeleteSelected() {
     deleteContacts([...selected])
     exitEditMode()
@@ -112,6 +153,16 @@ export default function ContactList() {
               <button className="btn btn-ghost" onClick={() => setEditMode(true)}>Edit</button>
               <span className="header-title">EvangNote CRM</span>
               <div style={{ display: 'flex', gap: 4 }}>
+                {/* Sync */}
+                <button
+                  className="btn-icon"
+                  onClick={syncFromContacts}
+                  disabled={syncing}
+                  title="Sync from iPhone Contacts"
+                  style={{ opacity: syncing ? 0.5 : 1 }}
+                >
+                  {syncing ? '⏳' : '🔄'}
+                </button>
                 {/* Menu */}
                 <div className="menu-wrap" ref={menuRef}>
                   <button className="btn-icon" onClick={() => setMenuOpen(v => !v)} title="More options">
@@ -235,6 +286,27 @@ export default function ContactList() {
           >
             🗑 Delete {selected.size} Contact{selected.size !== 1 ? 's' : ''}
           </button>
+        </div>
+      )}
+
+      {/* Sync toast */}
+      {syncToast && (
+        <div style={{
+          position: 'fixed',
+          bottom: 90,
+          left: '50%',
+          transform: 'translateX(-50%)',
+          background: syncToast.type === 'error' ? 'var(--gray-900)' : 'var(--green)',
+          color: '#fff',
+          padding: '10px 20px',
+          borderRadius: 24,
+          fontSize: 14,
+          fontWeight: 500,
+          boxShadow: 'var(--shadow-md)',
+          whiteSpace: 'nowrap',
+          zIndex: 100,
+        }}>
+          {syncToast.msg}
         </div>
       )}
 
