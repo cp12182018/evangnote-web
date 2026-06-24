@@ -37,6 +37,7 @@ export default function ContactList() {
   const [syncing, setSyncing] = useState(false)
   const [syncToast, setSyncToast] = useState(null) // { msg, type: 'success'|'error' }
   const menuRef = useRef(null)
+  const fileInputRef = useRef(null)
   const navigate = useNavigate()
 
   function load() { setContacts(getContacts()) }
@@ -84,6 +85,45 @@ export default function ContactList() {
   function showToast(msg, type = 'success') {
     setSyncToast({ msg, type })
     setTimeout(() => setSyncToast(null), 3500)
+  }
+
+  function parseVcf(text) {
+    return text.split(/BEGIN:VCARD/i).slice(1).map(card => {
+      const fnMatch = card.match(/^FN[^:]*:(.+)$/m)
+      const telMatch = card.match(/^TEL[^:]*:(.+)$/m)
+      return {
+        name: fnMatch ? fnMatch[1].trim() : '',
+        phone: telMatch ? telMatch[1].trim() : 'No Phone',
+      }
+    }).filter(c => c.name.length > 0)
+  }
+
+  function handleImport(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = ev => {
+      const parsed = parseVcf(ev.target.result)
+      if (parsed.length === 0) { showToast('No valid contacts found in file', 'error'); return }
+      const toAdd = parsed.map(p => ({
+        id: crypto.randomUUID(),
+        name: p.name,
+        phone: p.phone,
+        birthday: null,
+        dateAdded: new Date().toISOString(),
+        lastContacted: null,
+        latestReply: '',
+        notes: '',
+      }))
+      const added = bulkAddContacts(toAdd)
+      const skipped = toAdd.length - added
+      load()
+      if (added === 0) showToast(`All ${skipped} already in CRM`, 'error')
+      else if (skipped === 0) showToast(`✓ ${added} contact${added !== 1 ? 's' : ''} imported`)
+      else showToast(`✓ ${added} imported · ${skipped} already existed`)
+    }
+    reader.readAsText(file)
+    e.target.value = ''
   }
 
   async function syncFromContacts() {
@@ -170,11 +210,21 @@ export default function ContactList() {
                   </button>
                   {menuOpen && (
                     <div className="menu-dropdown">
+                      <button className="menu-item" onClick={() => { setMenuOpen(false); fileInputRef.current.click() }}>
+                        📥 Import .vcf Contacts
+                      </button>
                       <button className="menu-item danger" onClick={() => { setMenuOpen(false); setConfirm({ type: 'all' }) }}>
                         🗑 Delete All Contacts
                       </button>
                     </div>
                   )}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".vcf,text/vcard"
+                    style={{ display: 'none' }}
+                    onChange={handleImport}
+                  />
                 </div>
                 {/* Add */}
                 <button className="btn-icon" onClick={() => navigate('/add')} title="Add contact">
