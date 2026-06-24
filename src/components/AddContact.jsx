@@ -8,7 +8,7 @@ function uuid() {
 
 export default function AddContact() {
   const navigate = useNavigate()
-  const [form, setForm] = useState({ name: '', phone: '', birthday: '' })
+  const [form, setForm] = useState({ name: '', phone: '', birthday: '', firstContacted: '' })
   const [error, setError] = useState('')
 
   function set(key, val) { setForm(f => ({ ...f, [key]: val })) }
@@ -22,7 +22,7 @@ export default function AddContact() {
       phone: form.phone.trim() || 'No Phone',
       birthday: form.birthday ? new Date(form.birthday).toISOString() : null,
       dateAdded: new Date().toISOString(),
-      lastContacted: null,
+      lastContacted: form.firstContacted ? new Date(form.firstContacted).toISOString() : null,
       latestReply: '',
       notes: '',
     }
@@ -76,6 +76,16 @@ export default function AddContact() {
                 type="date"
                 value={form.birthday}
                 onChange={e => set('birthday', e.target.value)}
+              />
+            </div>
+
+            <div className="form-row">
+              <span className="form-label">First Contacted</span>
+              <input
+                className="form-input"
+                type="date"
+                value={form.firstContacted}
+                onChange={e => set('firstContacted', e.target.value)}
               />
             </div>
           </div>

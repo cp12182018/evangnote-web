@@ -49,6 +49,20 @@ export default function ContactDetail() {
     setEditing(false)
   }
 
+  function sendTextAndLog() {
+    const updated = {
+      ...contact,
+      lastContacted: new Date().toISOString(),
+      latestReply: 'Waiting',
+    }
+    updateContact(updated)
+    setContact(updated)
+    setDraft(updated)
+    // Open SMS app (same as iOS "Send Text & Log Date")
+    const clean = (contact.phone || '').replace(/\D/g, '')
+    if (clean) window.location.href = `sms:${clean}`
+  }
+
   function logContactNow() {
     const updated = {
       ...contact,
@@ -108,22 +122,22 @@ export default function ContactDetail() {
         {/* Quick Actions */}
         <div className="form-section">
           <div className="form-section-title">Quick Actions</div>
-          <button className="action-btn" onClick={logContactNow}>
-            <span className="action-icon">💬</span>
-            Log Contact Today
-          </button>
+          {contact.phone && contact.phone !== 'No Phone' && (
+            <button className="action-btn" onClick={sendTextAndLog}>
+              <span className="action-icon">💬</span>
+              Send Text &amp; Log Date
+            </button>
+          )}
           {contact.phone && contact.phone !== 'No Phone' && (
             <a className="action-btn" href={`tel:${contact.phone}`}>
               <span className="action-icon">📞</span>
-              Call {contact.phone}
+              Call Contact
             </a>
           )}
-          {contact.phone && contact.phone !== 'No Phone' && (
-            <a className="action-btn" href={`sms:${contact.phone}`}>
-              <span className="action-icon">✉️</span>
-              Send Text
-            </a>
-          )}
+          <button className="action-btn" onClick={logContactNow}>
+            <span className="action-icon">📝</span>
+            Log Contact Today (no text)
+          </button>
         </div>
 
         {/* CRM Status */}
