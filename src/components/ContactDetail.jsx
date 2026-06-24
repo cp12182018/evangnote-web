@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { getContacts, updateContact, deleteContact } from '../utils/storage'
+import { getContacts, updateContact, deleteContact, parseContactName } from '../utils/storage'
 
 function formatDate(iso) {
   if (!iso) return ''
@@ -47,6 +47,26 @@ export default function ContactDetail() {
   function cancel() {
     setDraft(contact)
     setEditing(false)
+  }
+
+  function toggleCame() {
+    const updated = { ...contact, came: !contact.came }
+    updateContact(updated)
+    setContact(updated)
+    setDraft(updated)
+  }
+
+  function extractDateFromName() {
+    const { cleanName, metDate } = parseContactName(contact.name)
+    const updated = {
+      ...contact,
+      name: cleanName,
+      lastContacted: metDate || contact.lastContacted,
+      latestReply: metDate && !contact.latestReply ? 'Waiting' : contact.latestReply,
+    }
+    updateContact(updated)
+    setContact(updated)
+    setDraft(updated)
   }
 
   function sendTextAndLog() {
@@ -119,6 +139,28 @@ export default function ContactDetail() {
           </div>
         )}
 
+        {/* Date-in-name detection banner */}
+        {parseContactName(contact.name).metDate && (
+          <div style={{
+            background: 'var(--blue-light)', border: '1px solid #bfdbfe',
+            borderRadius: 'var(--radius-sm)', padding: '10px 14px',
+            marginBottom: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8
+          }}>
+            <span style={{ fontSize: 13, color: 'var(--blue-dark)' }}>
+              📅 Date detected in name — extract it?
+            </span>
+            <button
+              onClick={extractDateFromName}
+              style={{
+                background: 'var(--blue)', color: '#fff', border: 'none',
+                borderRadius: 6, padding: '4px 12px', fontSize: 13, fontWeight: 600, cursor: 'pointer'
+              }}
+            >
+              Extract
+            </button>
+          </div>
+        )}
+
         {/* Quick Actions */}
         <div className="form-section">
           <div className="form-section-title">Quick Actions</div>
@@ -137,6 +179,10 @@ export default function ContactDetail() {
           <button className="action-btn" onClick={logContactNow}>
             <span className="action-icon">📝</span>
             Log Contact Today (no text)
+          </button>
+          <button className="action-btn" onClick={toggleCame} style={{ color: contact.came ? 'var(--green)' : 'var(--gray-700)' }}>
+            <span className="action-icon">{contact.came ? '✅' : '⛪'}</span>
+            {contact.came ? 'Came — tap to move back' : 'Mark as Came to Church'}
           </button>
         </div>
 

@@ -39,6 +39,21 @@ export function deleteAllContacts() {
   localStorage.removeItem(KEY);
 }
 
+// Parses a M.D.YY or M.D.YYYY date embedded in a contact name.
+// Returns { cleanName, metDate } — metDate is ISO string or null.
+export function parseContactName(rawName) {
+  const re = /\b(\d{1,2})\.(\d{1,2})\.(\d{2}|\d{4})\b/;
+  const m = rawName.match(re);
+  if (!m) return { cleanName: rawName.trim(), metDate: null };
+  let month = parseInt(m[1]), day = parseInt(m[2]), year = parseInt(m[3]);
+  if (year < 100) year += 2000;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return { cleanName: rawName.trim(), metDate: null };
+  const date = new Date(year, month - 1, day);
+  if (isNaN(date.getTime())) return { cleanName: rawName.trim(), metDate: null };
+  const cleanName = rawName.replace(re, '').replace(/\s+/g, ' ').trim();
+  return { cleanName, metDate: date.toISOString() };
+}
+
 // Returns how many were actually added (skips duplicates by phone or name)
 export function bulkAddContacts(newContacts) {
   const contacts = getContacts();

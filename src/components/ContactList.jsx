@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { getContacts, deleteContacts, deleteAllContacts, bulkAddContacts } from '../utils/storage'
+import { getContacts, deleteContacts, deleteAllContacts, bulkAddContacts, parseContactName } from '../utils/storage'
 
 const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000
 
 function formatDate(iso) {
   if (!iso) return null
   const d = new Date(iso)
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
 }
 
 function initials(name) {
@@ -32,10 +32,12 @@ export default function ContactList() {
   const [showRecent, setShowRecent] = useState(false)
   const [editMode, setEditMode] = useState(false)
   const [selected, setSelected] = useState(new Set())
-  const [confirm, setConfirm] = useState(null) // { type: 'selected' | 'all' }
+  const [confirm, setConfirm] = useState(null)
   const [menuOpen, setMenuOpen] = useState(false)
   const [syncing, setSyncing] = useState(false)
-  const [syncToast, setSyncToast] = useState(null) // { msg, type: 'success'|'error' }
+  const [syncToast, setSyncToast] = useState(null)
+  const [activeTab, setActiveTab] = useState('following') // 'following' | 'came'
+  const [sortBy, setSortBy] = useState('added') // 'added' | 'metdate' | 'name'
   const menuRef = useRef(null)
   const fileInputRef = useRef(null)
   const navigate = useNavigate()
@@ -43,7 +45,6 @@ export default function ContactList() {
   function load() { setContacts(getContacts()) }
   useEffect(() => { load() }, [])
 
-  // Close menu on outside click
   useEffect(() => {
     function handler(e) {
       if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false)
@@ -52,8 +53,14 @@ export default function ContactList() {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
+  // ── Tab split ──────────────────────────────────────────
+  const followingContacts = contacts.filter(c => !c.came)
+  const cameContacts = contacts.filter(c => c.came)
+  const tabContacts = activeTab === 'came' ? cameContacts : followingContacts
+
+  // ── Filter ─────────────────────────────────────────────
   const now = Date.now()
-  const filtered = contacts.filter(c => {
+  const filtered = tabContacts.filter(c => {
     if (search && !c.name.toLowerCase().includes(search.toLowerCase())) return false
     if (showRecent) {
       const addedRecent = (now - new Date(c.dateAdded).getTime()) < THIRTY_DAYS
@@ -63,6 +70,19 @@ export default function ContactList() {
     return true
   })
 
+  // ── Sort ───────────────────────────────────────────────
+  const sorted = [...filtered].sort((a, b) => {
+    if (sortBy === 'name') return a.name.localeCompare(b.name)
+    if (sortBy === 'metdate') {
+      const da = a.lastContacted ? new Date(a.lastContacted).getTime() : Infinity
+      const db = b.lastContacted ? new Date(b.lastContacted).getTime() : Infinity
+      return da - db // oldest first
+    }
+    // default: newest added first
+    return new Date(b.dateAdded).getTime() - new Date(a.dateAdded).getTime()
+  })
+
+  // ── Selection helpers ──────────────────────────────────
   function toggleSelect(id) {
     setSelected(prev => {
       const next = new Set(prev)
@@ -73,8 +93,8 @@ export default function ContactList() {
   }
 
   function selectAll() {
-    if (selected.size === filtered.length) setSelected(new Set())
-    else setSelected(new Set(filtered.map(c => c.id)))
+    if (selected.size === sorted.length) setSelected(new Set())
+    else setSelected(new Set(sorted.map(c => c.id)))
   }
 
   function exitEditMode() {
@@ -82,11 +102,27 @@ export default function ContactList() {
     setSelected(new Set())
   }
 
+  function confirmDeleteSelected() {
+    deleteContacts([...selected])
+    exitEditMode()
+    load()
+    setConfirm(null)
+  }
+
+  function confirmDeleteAll() {
+    deleteAllContacts()
+    exitEditMode()
+    load()
+    setConfirm(null)
+  }
+
+  // ── Toast ──────────────────────────────────────────────
   function showToast(msg, type = 'success') {
     setSyncToast({ msg, type })
     setTimeout(() => setSyncToast(null), 3500)
   }
 
+  // ── vCard import ───────────────────────────────────────
   function parseVcf(text) {
     return text.split(/BEGIN:VCARD/i).slice(1).map(card => {
       const fnMatch = card.match(/^FN[^:]*:(.+)$/m)
@@ -105,16 +141,20 @@ export default function ContactList() {
     reader.onload = ev => {
       const parsed = parseVcf(ev.target.result)
       if (parsed.length === 0) { showToast('No valid contacts found in file', 'error'); return }
-      const toAdd = parsed.map(p => ({
-        id: crypto.randomUUID(),
-        name: p.name,
-        phone: p.phone,
-        birthday: null,
-        dateAdded: new Date().toISOString(),
-        lastContacted: null,
-        latestReply: '',
-        notes: '',
-      }))
+      const toAdd = parsed.map(p => {
+        const { cleanName, metDate } = parseContactName(p.name)
+        return {
+          id: crypto.randomUUID(),
+          name: cleanName || p.name,
+          phone: p.phone,
+          birthday: null,
+          came: false,
+          dateAdded: new Date().toISOString(),
+          lastContacted: metDate,
+          latestReply: metDate ? 'Waiting' : '',
+          notes: '',
+        }
+      })
       const added = bulkAddContacts(toAdd)
       const skipped = toAdd.length - added
       load()
@@ -126,6 +166,7 @@ export default function ContactList() {
     e.target.value = ''
   }
 
+  // ── Sync from iPhone Contacts ──────────────────────────
   async function syncFromContacts() {
     if (!('contacts' in navigator && 'ContactsManager' in window)) {
       showToast('Open in iPhone Safari to use Sync', 'error')
@@ -136,16 +177,21 @@ export default function ContactList() {
       const picked = await navigator.contacts.select(['name', 'tel'], { multiple: true })
       if (!picked || picked.length === 0) { setSyncing(false); return }
       const toAdd = picked
-        .map(p => ({
-          id: crypto.randomUUID(),
-          name: (p.name?.[0] || '').trim(),
-          phone: p.tel?.[0]?.trim() || 'No Phone',
-          birthday: null,
-          dateAdded: new Date().toISOString(),
-          lastContacted: null,
-          latestReply: '',
-          notes: '',
-        }))
+        .map(p => {
+          const rawName = (p.name?.[0] || '').trim()
+          const { cleanName, metDate } = parseContactName(rawName)
+          return {
+            id: crypto.randomUUID(),
+            name: cleanName || rawName,
+            phone: p.tel?.[0]?.trim() || 'No Phone',
+            birthday: null,
+            came: false,
+            dateAdded: new Date().toISOString(),
+            lastContacted: metDate,
+            latestReply: metDate ? 'Waiting' : '',
+            notes: '',
+          }
+        })
         .filter(c => c.name.length > 0)
       const added = bulkAddContacts(toAdd)
       const skipped = toAdd.length - added
@@ -160,19 +206,7 @@ export default function ContactList() {
     }
   }
 
-  function confirmDeleteSelected() {
-    deleteContacts([...selected])
-    exitEditMode()
-    load()
-    setConfirm(null)
-  }
-
-  function confirmDeleteAll() {
-    deleteAllContacts()
-    exitEditMode()
-    load()
-    setConfirm(null)
-  }
+  const sortLabel = { added: 'Newest', metdate: 'Met Date ↑', name: 'A–Z' }
 
   return (
     <div className="page">
@@ -181,7 +215,7 @@ export default function ContactList() {
           {editMode ? (
             <>
               <button className="btn btn-ghost" onClick={selectAll}>
-                {selected.size === filtered.length ? 'Deselect All' : 'Select All'}
+                {selected.size === sorted.length ? 'Deselect All' : 'Select All'}
               </button>
               <span className="header-title">
                 {selected.size > 0 ? `${selected.size} Selected` : 'Select Contacts'}
@@ -193,7 +227,6 @@ export default function ContactList() {
               <button className="btn btn-ghost" onClick={() => setEditMode(true)}>Edit</button>
               <span className="header-title">EvangNote CRM</span>
               <div style={{ display: 'flex', gap: 4 }}>
-                {/* Sync */}
                 <button
                   className="btn-icon"
                   onClick={syncFromContacts}
@@ -203,11 +236,8 @@ export default function ContactList() {
                 >
                   {syncing ? '⏳' : '🔄'}
                 </button>
-                {/* Menu */}
                 <div className="menu-wrap" ref={menuRef}>
-                  <button className="btn-icon" onClick={() => setMenuOpen(v => !v)} title="More options">
-                    ⋯
-                  </button>
+                  <button className="btn-icon" onClick={() => setMenuOpen(v => !v)} title="More options">⋯</button>
                   {menuOpen && (
                     <div className="menu-dropdown">
                       <button className="menu-item" onClick={() => { setMenuOpen(false); fileInputRef.current.click() }}>
@@ -218,31 +248,19 @@ export default function ContactList() {
                       </button>
                     </div>
                   )}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".vcf,text/vcard"
-                    style={{ display: 'none' }}
-                    onChange={handleImport}
-                  />
+                  <input ref={fileInputRef} type="file" accept=".vcf,text/vcard" style={{ display: 'none' }} onChange={handleImport} />
                 </div>
-                {/* Add */}
-                <button className="btn-icon" onClick={() => navigate('/add')} title="Add contact">
-                  ＋
-                </button>
+                <button className="btn-icon" onClick={() => navigate('/add')} title="Add contact">＋</button>
               </div>
             </>
           )}
         </div>
 
-        {/* Large title + search */}
         {!editMode && (
           <div className="header-large">
             <div className="page-title">
               Contacts
-              {contacts.length > 0 && (
-                <span className="count-badge"> {contacts.length}</span>
-              )}
+              {contacts.length > 0 && <span className="count-badge"> {contacts.length}</span>}
             </div>
             <div className="search-wrap">
               <span className="search-icon">🔍</span>
@@ -258,9 +276,28 @@ export default function ContactList() {
       </div>
 
       <div className="page-content">
-        {/* Recent toggle */}
+
+        {/* ── Tabs ── */}
+        <div className="tab-bar">
+          <button
+            className={`tab-btn ${activeTab === 'following' ? 'tab-active' : ''}`}
+            onClick={() => { setActiveTab('following'); setSelected(new Set()) }}
+          >
+            Following Up
+            {followingContacts.length > 0 && <span className="tab-count">{followingContacts.length}</span>}
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'came' ? 'tab-active' : ''}`}
+            onClick={() => { setActiveTab('came'); setSelected(new Set()) }}
+          >
+            Came ⛪
+            {cameContacts.length > 0 && <span className="tab-count">{cameContacts.length}</span>}
+          </button>
+        </div>
+
+        {/* ── Filters row ── */}
         <div className="toggle-row">
-          <span className="toggle-label">Show Recent Only (Last 30 Days)</span>
+          <span className="toggle-label">Last 30 Days Only</span>
           <label className="toggle">
             <input type="checkbox" checked={showRecent} onChange={e => setShowRecent(e.target.checked)} />
             <span className="toggle-track"></span>
@@ -268,27 +305,43 @@ export default function ContactList() {
           </label>
         </div>
 
-        {filtered.length === 0 ? (
+        {/* ── Sort row ── */}
+        <div className="sort-row">
+          <span className="sort-label">Sort:</span>
+          {['added', 'metdate', 'name'].map(opt => (
+            <button
+              key={opt}
+              className={`sort-chip ${sortBy === opt ? 'sort-chip-active' : ''}`}
+              onClick={() => setSortBy(opt)}
+            >
+              {opt === 'added' ? 'Newest' : opt === 'metdate' ? 'Met Date ↑' : 'A–Z'}
+            </button>
+          ))}
+        </div>
+
+        {sorted.length === 0 ? (
           <div className="empty-state">
-            <div className="empty-icon">👥</div>
+            <div className="empty-icon">{activeTab === 'came' ? '⛪' : '👥'}</div>
             <div className="empty-title">
-              {search ? 'No results' : contacts.length === 0 ? 'No contacts yet' : 'No contacts in range'}
+              {search ? 'No results' : activeTab === 'came' ? 'No one marked as Came yet' : contacts.length === 0 ? 'No contacts yet' : 'No contacts in range'}
             </div>
             <div className="empty-desc">
               {search
                 ? `No contacts match "${search}"`
-                : contacts.length === 0
-                  ? 'Tap + to add your first evangelism contact'
-                  : 'No contacts added or followed up in the last 30 days'}
+                : activeTab === 'came'
+                  ? 'Open a contact and tap "Mark as Came to Church"'
+                  : contacts.length === 0
+                    ? 'Tap + to add your first evangelism contact'
+                    : 'No contacts added or followed up in the last 30 days'}
             </div>
           </div>
         ) : (
           <>
             <div className="section-header">
-              {showRecent ? 'Recent (Last 30 Days)' : 'All Contacts'} — {filtered.length}
+              {activeTab === 'came' ? 'Came to Church' : showRecent ? 'Recent (Last 30 Days)' : 'Following Up'} — {sorted.length}
             </div>
             <ul className="contact-list">
-              {filtered.map(c => {
+              {sorted.map(c => {
                 const st = statusLabel(c.latestReply)
                 return (
                   <li key={c.id} className="contact-card">
@@ -312,9 +365,11 @@ export default function ContactList() {
                       <div className="contact-avatar">{initials(c.name)}</div>
                       <div className="contact-info">
                         <div className="contact-name">{c.name}</div>
-                        <div className={`contact-meta ${showRecent ? 'recent' : ''}`}>
-                          Added {formatDate(c.dateAdded)}
-                          {c.lastContacted && ` · Contacted ${formatDate(c.lastContacted)}`}
+                        <div className="contact-meta">
+                          {c.lastContacted
+                            ? `Met ${formatDate(c.lastContacted)}`
+                            : `Added ${formatDate(c.dateAdded)}`}
+                          {c.lastContacted && c.dateAdded && ` · Added ${formatDate(c.dateAdded)}`}
                         </div>
                       </div>
                       <span className={`status-badge ${st.cls}`}>{st.label}</span>
@@ -327,13 +382,9 @@ export default function ContactList() {
         )}
       </div>
 
-      {/* Bottom bar in edit mode */}
       {editMode && selected.size > 0 && (
         <div className="bottom-bar">
-          <button
-            className="btn btn-danger btn-full"
-            onClick={() => setConfirm({ type: 'selected' })}
-          >
+          <button className="btn btn-danger btn-full" onClick={() => setConfirm({ type: 'selected' })}>
             🗑 Delete {selected.size} Contact{selected.size !== 1 ? 's' : ''}
           </button>
         </div>
@@ -342,25 +393,15 @@ export default function ContactList() {
       {/* Sync toast */}
       {syncToast && (
         <div style={{
-          position: 'fixed',
-          bottom: 90,
-          left: '50%',
-          transform: 'translateX(-50%)',
+          position: 'fixed', bottom: 90, left: '50%', transform: 'translateX(-50%)',
           background: syncToast.type === 'error' ? 'var(--gray-900)' : 'var(--green)',
-          color: '#fff',
-          padding: '10px 20px',
-          borderRadius: 24,
-          fontSize: 14,
-          fontWeight: 500,
-          boxShadow: 'var(--shadow-md)',
-          whiteSpace: 'nowrap',
-          zIndex: 100,
+          color: '#fff', padding: '10px 20px', borderRadius: 24, fontSize: 14,
+          fontWeight: 500, boxShadow: 'var(--shadow-md)', whiteSpace: 'nowrap', zIndex: 100,
         }}>
           {syncToast.msg}
         </div>
       )}
 
-      {/* Confirm dialogs */}
       {confirm && (
         <div className="overlay" onClick={() => setConfirm(null)}>
           <div className="dialog" onClick={e => e.stopPropagation()}>
@@ -369,19 +410,12 @@ export default function ContactList() {
             </div>
             <div className="dialog-body">
               {confirm.type === 'all'
-                ? 'This will remove your entire CRM. This cannot be undone.'
+                ? 'This will remove your entire CRM. Cannot be undone.'
                 : 'The selected contacts will be permanently removed from EvangNote.'}
             </div>
             <div className="dialog-actions">
-              <button className="btn" style={{ background: 'var(--gray-100)', color: 'var(--gray-700)' }} onClick={() => setConfirm(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-danger"
-                onClick={confirm.type === 'all' ? confirmDeleteAll : confirmDeleteSelected}
-              >
-                Delete
-              </button>
+              <button className="btn" style={{ background: 'var(--gray-100)', color: 'var(--gray-700)' }} onClick={() => setConfirm(null)}>Cancel</button>
+              <button className="btn btn-danger" onClick={confirm.type === 'all' ? confirmDeleteAll : confirmDeleteSelected}>Delete</button>
             </div>
           </div>
         </div>
