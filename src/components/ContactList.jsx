@@ -1,48 +1,50 @@
 import { useState, useEffect, useRef } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { getContacts, deleteContacts, deleteAllContacts, bulkAddContacts, parseContactName } from '../utils/storage'
+import { useNavigate } from 'react-router-dom'
+import {
+  getContacts, deleteContacts, deleteAllContacts,
+  bulkAddContacts, parseContactName, parseVcf, parseCsv,
+  importBackup, exportBackup,
+  STAGES, STAGE_LABELS, STAGE_COLORS,
+  getSettings,
+} from '../utils/storage'
 
-const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000
+const DAY_MS = 24 * 60 * 60 * 1000
 
-function formatDate(iso) {
-  if (!iso) return null
-  const d = new Date(iso)
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
+function formatDate(ms) {
+  if (!ms) return null
+  return new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
 }
 
 function initials(name) {
-  return name
-    .split(' ')
-    .slice(0, 2)
-    .map(w => w[0] || '')
-    .join('')
-    .toUpperCase()
+  return name.split(' ').slice(0, 2).map(w => w[0] || '').join('').toUpperCase()
 }
 
-function statusLabel(reply) {
-  if (!reply) return { label: 'New', cls: 'status-new' }
-  if (reply === 'Waiting') return { label: 'Waiting', cls: 'status-waiting' }
-  if (reply === 'Replied') return { label: 'Replied', cls: 'status-replied' }
-  return { label: 'No action', cls: 'status-none' }
+function daysSince(ms) {
+  if (!ms) return null
+  return Math.floor((Date.now() - ms) / DAY_MS)
 }
 
 export default function ContactList() {
-  const [contacts, setContacts] = useState([])
-  const [search, setSearch] = useState('')
-  const [showRecent, setShowRecent] = useState(false)
-  const [editMode, setEditMode] = useState(false)
-  const [selected, setSelected] = useState(new Set())
-  const [confirm, setConfirm] = useState(null)
-  const [menuOpen, setMenuOpen] = useState(false)
-  const [syncing, setSyncing] = useState(false)
-  const [syncToast, setSyncToast] = useState(null)
-  const [activeTab, setActiveTab] = useState('following') // 'following' | 'came'
-  const [sortBy, setSortBy] = useState('added') // 'added' | 'metdate' | 'name'
-  const menuRef = useRef(null)
-  const fileInputRef = useRef(null)
-  const navigate = useNavigate()
+  const [contacts, setContacts]       = useState([])
+  const [settings, setSettings]       = useState({ userName: '', followUpDays: 7 })
+  const [search, setSearch]           = useState('')
+  const [activeTab, setActiveTab]     = useState('today') // 'today' | 'all'
+  const [stageFilter, setStageFilter] = useState('')
+  const [sortBy, setSortBy]           = useState('updated') // 'updated' | 'met' | 'name'
+  const [editMode, setEditMode]       = useState(false)
+  const [selected, setSelected]       = useState(new Set())
+  const [confirm, setConfirm]         = useState(null)
+  const [menuOpen, setMenuOpen]       = useState(false)
+  const [syncing, setSyncing]         = useState(false)
+  const [toast, setToast]             = useState(null)
 
-  function load() { setContacts(getContacts()) }
+  const menuRef     = useRef(null)
+  const vcfInputRef = useRef(null)
+  const csvInputRef = useRef(null)
+  const bkpInputRef = useRef(null)
+  const navigate    = useNavigate()
+
+  function load() { setContacts(getContacts()); setSettings(getSettings()) }
   useEffect(() => { load() }, [])
 
   useEffect(() => {
@@ -53,163 +55,160 @@ export default function ContactList() {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  // ── Tab split ──────────────────────────────────────────
-  const followingContacts = contacts.filter(c => !c.came)
-  const cameContacts = contacts.filter(c => c.came)
-  const tabContacts = activeTab === 'came' ? cameContacts : followingContacts
+  // ── Today: not contacted in followUpDays, not "growing" ──
+  const followUpMs = (settings.followUpDays || 7) * DAY_MS
+  const todayList = contacts.filter(c => {
+    if (c.stage === 'growing') return false
+    const lastMs = c.lastContactedAt || c.metOn || c.createdAt
+    return !lastMs || (Date.now() - lastMs) >= followUpMs
+  })
 
-  // ── Filter ─────────────────────────────────────────────
-  const now = Date.now()
-  const filtered = tabContacts.filter(c => {
+  // ── All: stage filter + search ──
+  const allFiltered = contacts.filter(c => {
+    if (stageFilter && c.stage !== stageFilter) return false
     if (search && !c.name.toLowerCase().includes(search.toLowerCase())) return false
-    if (showRecent) {
-      const addedRecent = (now - new Date(c.dateAdded).getTime()) < THIRTY_DAYS
-      const contactedRecent = c.lastContacted && (now - new Date(c.lastContacted).getTime()) < THIRTY_DAYS
-      if (!addedRecent && !contactedRecent) return false
-    }
     return true
   })
 
-  // ── Sort ───────────────────────────────────────────────
-  const sorted = [...filtered].sort((a, b) => {
+  const baseList = activeTab === 'today' ? todayList : allFiltered
+  const sorted = [...baseList].sort((a, b) => {
     if (sortBy === 'name') return a.name.localeCompare(b.name)
-    if (sortBy === 'metdate') {
-      const da = a.lastContacted ? new Date(a.lastContacted).getTime() : Infinity
-      const db = b.lastContacted ? new Date(b.lastContacted).getTime() : Infinity
-      return da - db // oldest first
-    }
-    // default: newest added first
-    return new Date(b.dateAdded).getTime() - new Date(a.dateAdded).getTime()
+    if (sortBy === 'met')  return (a.metOn ?? Infinity) - (b.metOn ?? Infinity)
+    return (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
   })
 
-  // ── Selection helpers ──────────────────────────────────
+  const stageCounts = {}
+  STAGES.forEach(s => { stageCounts[s] = contacts.filter(c => c.stage === s).length })
+
+  // ── Selection ──
   function toggleSelect(id) {
-    setSelected(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
+    setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
   }
-
   function selectAll() {
-    if (selected.size === sorted.length) setSelected(new Set())
-    else setSelected(new Set(sorted.map(c => c.id)))
+    setSelected(selected.size === sorted.length ? new Set() : new Set(sorted.map(c => c.id)))
   }
+  function exitEdit() { setEditMode(false); setSelected(new Set()) }
 
-  function exitEditMode() {
-    setEditMode(false)
-    setSelected(new Set())
-  }
+  function confirmDeleteSelected() { deleteContacts([...selected]); exitEdit(); load(); setConfirm(null) }
+  function confirmDeleteAll()      { deleteAllContacts(); exitEdit(); load(); setConfirm(null) }
 
-  function confirmDeleteSelected() {
-    deleteContacts([...selected])
-    exitEditMode()
-    load()
-    setConfirm(null)
-  }
-
-  function confirmDeleteAll() {
-    deleteAllContacts()
-    exitEditMode()
-    load()
-    setConfirm(null)
-  }
-
-  // ── Toast ──────────────────────────────────────────────
   function showToast(msg, type = 'success') {
-    setSyncToast({ msg, type })
-    setTimeout(() => setSyncToast(null), 3500)
+    setToast({ msg, type })
+    setTimeout(() => setToast(null), 3500)
   }
 
-  // ── vCard import ───────────────────────────────────────
-  function parseVcf(text) {
-    return text.split(/BEGIN:VCARD/i).slice(1).map(card => {
-      const fnMatch = card.match(/^FN[^:]*:(.+)$/m)
-      const telMatch = card.match(/^TEL[^:]*:(.+)$/m)
-      return {
-        name: fnMatch ? fnMatch[1].trim() : '',
-        phone: telMatch ? telMatch[1].trim() : 'No Phone',
-      }
-    }).filter(c => c.name.length > 0)
+  // ── Import helpers ──
+  function runImport(items, source) {
+    if (!items.length) { showToast(`No contacts found in ${source}`, 'error'); return }
+    const added   = bulkAddContacts(items)
+    const skipped = items.length - added
+    load()
+    if (added === 0)   showToast(`All ${skipped} already in CRM`, 'error')
+    else if (!skipped) showToast(`✓ ${added} imported from ${source}`)
+    else               showToast(`✓ ${added} imported · ${skipped} skipped`)
   }
 
-  function handleImport(e) {
-    const file = e.target.files?.[0]
-    if (!file) return
+  function handleVcf(e) {
+    const file = e.target.files?.[0]; if (!file) return
     const reader = new FileReader()
     reader.onload = ev => {
       const parsed = parseVcf(ev.target.result)
-      if (parsed.length === 0) { showToast('No valid contacts found in file', 'error'); return }
-      const toAdd = parsed.map(p => {
+      const toAdd  = parsed.map(p => {
         const { cleanName, metDate } = parseContactName(p.name)
         return {
-          id: crypto.randomUUID(),
-          name: cleanName || p.name,
-          phone: p.phone,
-          birthday: null,
-          came: false,
-          dateAdded: new Date().toISOString(),
-          lastContacted: metDate,
-          latestReply: metDate ? 'Waiting' : '',
-          notes: '',
+          id: crypto.randomUUID(), name: cleanName || p.name, phone: p.phone || '',
+          metAt: '', metOn: metDate, lastContactedAt: metDate,
+          stage: 'new', notes: '', prayer: '', tags: [], coworkers: [],
+          birthday: null, lastReply: metDate ? 'Waiting' : '',
+          createdAt: Date.now(), updatedAt: Date.now(),
         }
       })
-      const added = bulkAddContacts(toAdd)
-      const skipped = toAdd.length - added
-      load()
-      if (added === 0) showToast(`All ${skipped} already in CRM`, 'error')
-      else if (skipped === 0) showToast(`✓ ${added} contact${added !== 1 ? 's' : ''} imported`)
-      else showToast(`✓ ${added} imported · ${skipped} already existed`)
+      runImport(toAdd, '.vcf')
     }
-    reader.readAsText(file)
-    e.target.value = ''
+    reader.readAsText(file); e.target.value = ''
   }
 
-  // ── Sync from iPhone Contacts ──────────────────────────
+  function handleCsv(e) {
+    const file = e.target.files?.[0]; if (!file) return
+    const reader = new FileReader()
+    reader.onload = ev => {
+      const parsed = parseCsv(ev.target.result)
+      const toAdd  = parsed.map(p => ({
+        id: crypto.randomUUID(), name: p.name, phone: p.phone || '',
+        metAt: '', metOn: null, lastContactedAt: null,
+        stage: 'new', notes: '', prayer: '', tags: [], coworkers: [],
+        birthday: null, lastReply: '',
+        createdAt: Date.now(), updatedAt: Date.now(),
+      }))
+      runImport(toAdd, '.csv')
+    }
+    reader.readAsText(file); e.target.value = ''
+  }
+
+  function handleBackup(e) {
+    const file = e.target.files?.[0]; if (!file) return
+    const reader = new FileReader()
+    reader.onload = ev => {
+      const result = importBackup(ev.target.result)
+      load()
+      if (result.success) showToast(`✓ Restored ${result.count} contacts from backup`)
+      else showToast(`Restore failed: ${result.error}`, 'error')
+    }
+    reader.readAsText(file); e.target.value = ''
+  }
+
   async function syncFromContacts() {
     if (!('contacts' in navigator && 'ContactsManager' in window)) {
-      showToast('Open in iPhone Safari to use Sync', 'error')
-      return
+      showToast('Open in iPhone Safari to use Sync', 'error'); return
     }
     setSyncing(true)
     try {
       const picked = await navigator.contacts.select(['name', 'tel'], { multiple: true })
-      if (!picked || picked.length === 0) { setSyncing(false); return }
-      const toAdd = picked
-        .map(p => {
-          const rawName = (p.name?.[0] || '').trim()
-          const { cleanName, metDate } = parseContactName(rawName)
-          return {
-            id: crypto.randomUUID(),
-            name: cleanName || rawName,
-            phone: p.tel?.[0]?.trim() || 'No Phone',
-            birthday: null,
-            came: false,
-            dateAdded: new Date().toISOString(),
-            lastContacted: metDate,
-            latestReply: metDate ? 'Waiting' : '',
-            notes: '',
-          }
-        })
-        .filter(c => c.name.length > 0)
-      const added = bulkAddContacts(toAdd)
-      const skipped = toAdd.length - added
-      load()
-      if (added === 0) showToast(`All ${skipped} already in CRM`, 'error')
-      else if (skipped === 0) showToast(`✓ ${added} contact${added !== 1 ? 's' : ''} added`)
-      else showToast(`✓ ${added} added · ${skipped} already existed`)
+      if (!picked?.length) { setSyncing(false); return }
+      const toAdd = picked.map(p => {
+        const raw = (p.name?.[0] || '').trim()
+        const { cleanName, metDate } = parseContactName(raw)
+        return {
+          id: crypto.randomUUID(), name: cleanName || raw, phone: p.tel?.[0]?.trim() || '',
+          metAt: '', metOn: metDate, lastContactedAt: metDate,
+          stage: 'new', notes: '', prayer: '', tags: [], coworkers: [],
+          birthday: null, lastReply: metDate ? 'Waiting' : '',
+          createdAt: Date.now(), updatedAt: Date.now(),
+        }
+      }).filter(c => c.name)
+      runImport(toAdd, 'Contacts')
     } catch (e) {
       if (e.name !== 'AbortError') showToast('Sync failed. Try again.', 'error')
-    } finally {
-      setSyncing(false)
-    }
+    } finally { setSyncing(false) }
   }
 
-  const sortLabel = { added: 'Newest', metdate: 'Met Date ↑', name: 'A–Z' }
+  // ── Stage pill ──
+  function StagePill({ stage }) {
+    const color = STAGE_COLORS[stage] || '#9ca3af'
+    return (
+      <span style={{
+        background: color + '20', color, border: `1px solid ${color}50`,
+        borderRadius: 99, padding: '2px 7px', fontSize: 11, fontWeight: 600,
+      }}>
+        {STAGE_LABELS[stage] || stage}
+      </span>
+    )
+  }
+
+  function AgeBadge({ c }) {
+    const days = daysSince(c.lastContactedAt || c.metOn)
+    if (days === null) return null
+    const urgent = days >= (settings.followUpDays || 7)
+    return (
+      <span style={{ fontSize: 11, color: urgent ? '#ef4444' : '#9ca3af', fontWeight: urgent ? 600 : 400 }}>
+        {days === 0 ? 'today' : `${days}d ago`}
+      </span>
+    )
+  }
 
   return (
     <div className="page">
+      {/* ── Header ── */}
       <div className="header">
         <div className="header-inner">
           {editMode ? (
@@ -217,40 +216,35 @@ export default function ContactList() {
               <button className="btn btn-ghost" onClick={selectAll}>
                 {selected.size === sorted.length ? 'Deselect All' : 'Select All'}
               </button>
-              <span className="header-title">
-                {selected.size > 0 ? `${selected.size} Selected` : 'Select Contacts'}
-              </span>
-              <button className="btn btn-ghost" onClick={exitEditMode}>Done</button>
+              <span className="header-title">{selected.size > 0 ? `${selected.size} Selected` : 'Select'}</span>
+              <button className="btn btn-ghost" onClick={exitEdit}>Done</button>
             </>
           ) : (
             <>
               <button className="btn btn-ghost" onClick={() => setEditMode(true)}>Edit</button>
-              <span className="header-title">EvangNote CRM</span>
+              <span className="header-title">EvangNote</span>
               <div style={{ display: 'flex', gap: 4 }}>
-                <button
-                  className="btn-icon"
-                  onClick={syncFromContacts}
-                  disabled={syncing}
-                  title="Sync from iPhone Contacts"
-                  style={{ opacity: syncing ? 0.5 : 1 }}
-                >
+                <button className="btn-icon" onClick={syncFromContacts} disabled={syncing}
+                  title="Sync from iPhone Contacts" style={{ opacity: syncing ? 0.5 : 1 }}>
                   {syncing ? '⏳' : '🔄'}
                 </button>
                 <div className="menu-wrap" ref={menuRef}>
-                  <button className="btn-icon" onClick={() => setMenuOpen(v => !v)} title="More options">⋯</button>
+                  <button className="btn-icon" onClick={() => setMenuOpen(v => !v)} title="More">⋯</button>
                   {menuOpen && (
                     <div className="menu-dropdown">
-                      <button className="menu-item" onClick={() => { setMenuOpen(false); fileInputRef.current.click() }}>
-                        📥 Import .vcf Contacts
-                      </button>
-                      <button className="menu-item danger" onClick={() => { setMenuOpen(false); setConfirm({ type: 'all' }) }}>
-                        🗑 Delete All Contacts
-                      </button>
+                      <button className="menu-item" onClick={() => { setMenuOpen(false); vcfInputRef.current.click() }}>📇 Import .vcf</button>
+                      <button className="menu-item" onClick={() => { setMenuOpen(false); csvInputRef.current.click() }}>📊 Import .csv</button>
+                      <button className="menu-item" onClick={() => { setMenuOpen(false); bkpInputRef.current.click() }}>📥 Restore backup</button>
+                      <button className="menu-item" onClick={() => { setMenuOpen(false); exportBackup() }}>📤 Export backup</button>
+                      <div style={{ borderTop: '1px solid #e5e7eb', margin: '4px 0' }} />
+                      <button className="menu-item danger" onClick={() => { setMenuOpen(false); setConfirm({ type: 'all' }) }}>🗑 Delete All</button>
                     </div>
                   )}
-                  <input ref={fileInputRef} type="file" accept=".vcf,text/vcard" style={{ display: 'none' }} onChange={handleImport} />
+                  <input ref={vcfInputRef} type="file" accept=".vcf,text/vcard"        style={{ display: 'none' }} onChange={handleVcf} />
+                  <input ref={csvInputRef} type="file" accept=".csv,text/csv"          style={{ display: 'none' }} onChange={handleCsv} />
+                  <input ref={bkpInputRef} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={handleBackup} />
                 </div>
-                <button className="btn-icon" onClick={() => navigate('/add')} title="Add contact">＋</button>
+                <button className="btn-icon" onClick={() => navigate('/add')} title="Add">＋</button>
               </div>
             </>
           )}
@@ -259,17 +253,12 @@ export default function ContactList() {
         {!editMode && (
           <div className="header-large">
             <div className="page-title">
-              Contacts
-              {contacts.length > 0 && <span className="count-badge"> {contacts.length}</span>}
+              Contacts{contacts.length > 0 && <span className="count-badge"> {contacts.length}</span>}
             </div>
             <div className="search-wrap">
               <span className="search-icon">🔍</span>
-              <input
-                className="search-input"
-                placeholder="Search contacts..."
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-              />
+              <input className="search-input" placeholder="Search contacts…"
+                value={search} onChange={e => setSearch(e.target.value)} />
             </div>
           </div>
         )}
@@ -279,104 +268,100 @@ export default function ContactList() {
 
         {/* ── Tabs ── */}
         <div className="tab-bar">
-          <button
-            className={`tab-btn ${activeTab === 'following' ? 'tab-active' : ''}`}
-            onClick={() => { setActiveTab('following'); setSelected(new Set()) }}
-          >
-            Following Up
-            {followingContacts.length > 0 && <span className="tab-count">{followingContacts.length}</span>}
+          <button className={`tab-btn ${activeTab === 'today' ? 'tab-active' : ''}`}
+            onClick={() => { setActiveTab('today'); setSelected(new Set()) }}>
+            ☀️ Follow Up
+            {todayList.length > 0 && <span className="tab-count">{todayList.length}</span>}
           </button>
-          <button
-            className={`tab-btn ${activeTab === 'came' ? 'tab-active' : ''}`}
-            onClick={() => { setActiveTab('came'); setSelected(new Set()) }}
-          >
-            Came ⛪
-            {cameContacts.length > 0 && <span className="tab-count">{cameContacts.length}</span>}
+          <button className={`tab-btn ${activeTab === 'all' ? 'tab-active' : ''}`}
+            onClick={() => { setActiveTab('all'); setSelected(new Set()) }}>
+            All
+            {contacts.length > 0 && <span className="tab-count">{contacts.length}</span>}
           </button>
         </div>
 
-        {/* ── Filters row ── */}
-        <div className="toggle-row">
-          <span className="toggle-label">Last 30 Days Only</span>
-          <label className="toggle">
-            <input type="checkbox" checked={showRecent} onChange={e => setShowRecent(e.target.checked)} />
-            <span className="toggle-track"></span>
-            <span className="toggle-thumb"></span>
-          </label>
-        </div>
+        {/* ── Stage chips (All tab) ── */}
+        {activeTab === 'all' && (
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', padding: '6px 0 2px' }}>
+            <button className={`sort-chip ${!stageFilter ? 'sort-chip-active' : ''}`}
+              onClick={() => setStageFilter('')}>All</button>
+            {STAGES.map(s => (
+              <button key={s}
+                className={`sort-chip ${stageFilter === s ? 'sort-chip-active' : ''}`}
+                style={stageFilter === s ? { background: STAGE_COLORS[s], color: '#fff', borderColor: STAGE_COLORS[s] } : {}}
+                onClick={() => setStageFilter(stageFilter === s ? '' : s)}>
+                {STAGE_LABELS[s]}
+                {stageCounts[s] > 0 && <span style={{ marginLeft: 4, opacity: 0.7 }}>{stageCounts[s]}</span>}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* ── Sort row ── */}
         <div className="sort-row">
           <span className="sort-label">Sort:</span>
-          {['added', 'metdate', 'name'].map(opt => (
-            <button
-              key={opt}
-              className={`sort-chip ${sortBy === opt ? 'sort-chip-active' : ''}`}
-              onClick={() => setSortBy(opt)}
-            >
-              {opt === 'added' ? 'Newest' : opt === 'metdate' ? 'Met Date ↑' : 'A–Z'}
-            </button>
+          {[['updated','Recent'],['met','Met ↑'],['name','A–Z']].map(([val, label]) => (
+            <button key={val}
+              className={`sort-chip ${sortBy === val ? 'sort-chip-active' : ''}`}
+              onClick={() => setSortBy(val)}>{label}</button>
           ))}
         </div>
 
+        {activeTab === 'today' && todayList.length > 0 && (
+          <div style={{ fontSize: 13, color: '#6b7280', marginBottom: 4 }}>
+            Not contacted in {settings.followUpDays || 7}+ days
+          </div>
+        )}
+
+        {/* ── Contact list ── */}
         {sorted.length === 0 ? (
           <div className="empty-state">
-            <div className="empty-icon">{activeTab === 'came' ? '⛪' : '👥'}</div>
+            <div className="empty-icon">{activeTab === 'today' ? '🎉' : '👥'}</div>
             <div className="empty-title">
-              {search ? 'No results' : activeTab === 'came' ? 'No one marked as Came yet' : contacts.length === 0 ? 'No contacts yet' : 'No contacts in range'}
+              {activeTab === 'today' ? 'All caught up!'
+                : search ? 'No results'
+                : contacts.length === 0 ? 'No contacts yet'
+                : 'None in this stage'}
             </div>
             <div className="empty-desc">
-              {search
-                ? `No contacts match "${search}"`
-                : activeTab === 'came'
-                  ? 'Open a contact and tap "Mark as Came to Church"'
-                  : contacts.length === 0
-                    ? 'Tap + to add your first evangelism contact'
-                    : 'No contacts added or followed up in the last 30 days'}
+              {activeTab === 'today'
+                ? `Everyone's been followed up in the last ${settings.followUpDays || 7} days.`
+                : search ? `No contacts match "${search}"`
+                : contacts.length === 0 ? 'Tap + to add your first evangelism contact'
+                : 'Try a different stage filter'}
             </div>
           </div>
         ) : (
           <>
             <div className="section-header">
-              {activeTab === 'came' ? 'Came to Church' : showRecent ? 'Recent (Last 30 Days)' : 'Following Up'} — {sorted.length}
+              {activeTab === 'today' ? 'Follow up' : stageFilter ? STAGE_LABELS[stageFilter] : 'All contacts'} — {sorted.length}
             </div>
             <ul className="contact-list">
-              {sorted.map(c => {
-                const st = statusLabel(c.latestReply)
-                return (
-                  <li key={c.id} className="contact-card">
-                    <div
-                      className="contact-row"
-                      onClick={() => {
-                        if (editMode) toggleSelect(c.id)
-                        else navigate(`/contact/${c.id}`)
-                      }}
-                    >
-                      {editMode && (
-                        <div className="checkbox-col">
-                          <input
-                            type="checkbox"
-                            checked={selected.has(c.id)}
-                            onChange={() => toggleSelect(c.id)}
-                            onClick={e => e.stopPropagation()}
-                          />
-                        </div>
-                      )}
-                      <div className="contact-avatar">{initials(c.name)}</div>
-                      <div className="contact-info">
-                        <div className="contact-name">{c.name}</div>
-                        <div className="contact-meta">
-                          {c.lastContacted
-                            ? `Met ${formatDate(c.lastContacted)}`
-                            : `Added ${formatDate(c.dateAdded)}`}
-                          {c.lastContacted && c.dateAdded && ` · Added ${formatDate(c.dateAdded)}`}
-                        </div>
+              {sorted.map(c => (
+                <li key={c.id} className="contact-card">
+                  <div className="contact-row"
+                    onClick={() => editMode ? toggleSelect(c.id) : navigate(`/contact/${c.id}`)}>
+                    {editMode && (
+                      <div className="checkbox-col">
+                        <input type="checkbox" checked={selected.has(c.id)}
+                          onChange={() => toggleSelect(c.id)} onClick={e => e.stopPropagation()} />
                       </div>
-                      <span className={`status-badge ${st.cls}`}>{st.label}</span>
+                    )}
+                    <div className="contact-avatar"
+                      style={{ background: (STAGE_COLORS[c.stage] || '#9ca3af') + '20', color: STAGE_COLORS[c.stage] || '#6b7280' }}>
+                      {initials(c.name)}
                     </div>
-                  </li>
-                )
-              })}
+                    <div className="contact-info">
+                      <div className="contact-name">{c.name}</div>
+                      <div className="contact-meta" style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <StagePill stage={c.stage} />
+                        {c.metOn && <span>Met {formatDate(c.metOn)}</span>}
+                        <AgeBadge c={c} />
+                      </div>
+                    </div>
+                  </div>
+                </li>
+              ))}
             </ul>
           </>
         )}
@@ -390,16 +375,13 @@ export default function ContactList() {
         </div>
       )}
 
-      {/* Sync toast */}
-      {syncToast && (
+      {toast && (
         <div style={{
           position: 'fixed', bottom: 90, left: '50%', transform: 'translateX(-50%)',
-          background: syncToast.type === 'error' ? 'var(--gray-900)' : 'var(--green)',
+          background: toast.type === 'error' ? 'var(--gray-900)' : 'var(--green)',
           color: '#fff', padding: '10px 20px', borderRadius: 24, fontSize: 14,
           fontWeight: 500, boxShadow: 'var(--shadow-md)', whiteSpace: 'nowrap', zIndex: 100,
-        }}>
-          {syncToast.msg}
-        </div>
+        }}>{toast.msg}</div>
       )}
 
       {confirm && (
@@ -409,9 +391,7 @@ export default function ContactList() {
               {confirm.type === 'all' ? 'Delete All Contacts?' : `Delete ${selected.size} Contact${selected.size !== 1 ? 's' : ''}?`}
             </div>
             <div className="dialog-body">
-              {confirm.type === 'all'
-                ? 'This will remove your entire CRM. Cannot be undone.'
-                : 'The selected contacts will be permanently removed from EvangNote.'}
+              {confirm.type === 'all' ? 'This removes your entire CRM. Cannot be undone.' : 'Selected contacts will be permanently removed.'}
             </div>
             <div className="dialog-actions">
               <button className="btn" style={{ background: 'var(--gray-100)', color: 'var(--gray-700)' }} onClick={() => setConfirm(null)}>Cancel</button>
