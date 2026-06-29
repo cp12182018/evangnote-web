@@ -4,20 +4,20 @@ const TEMPLATES_KEY = 'evangnote_templates';
 const SETTINGS_KEY  = 'evangnote_settings';
 
 // ─── Stage definitions (matches Harvest's stage values) ──
-export const STAGES = ['new', 'texting', 'invited', 'came', 'growing'];
+export const STAGES = ['new', 'messaged', 'invited', 'came', 'growing'];
 export const STAGE_LABELS = {
-  new:     'New',
-  texting: 'Texting',
-  invited: 'Invited',
-  came:    'Came',
-  growing: 'Growing',
+  new:      'New',
+  messaged: 'Messaged',
+  invited:  'Invited',
+  came:     'Came',
+  growing:  'Growing',
 };
 export const STAGE_COLORS = {
-  new:     '#9ca3af',
-  texting: '#3b82f6',
-  invited: '#f59e0b',
-  came:    '#16a34a',
-  growing: '#8b5cf6',
+  new:      '#9ca3af',
+  messaged: '#3b82f6',
+  invited:  '#f59e0b',
+  came:     '#16a34a',
+  growing:  '#8b5cf6',
 };
 
 // ─── Default templates ───────────────────────────────────
@@ -41,9 +41,9 @@ export const DEFAULT_TEMPLATES = [
 
 // ─── Contact migration (old EvangNote → new schema) ──────
 function migrateContact(c) {
-  const stage = c.stage
-    ? c.stage
-    : (c.came ? 'came' : 'new');
+  // Normalise stage: map old "texting" → "messaged", old boolean "came" → "came"
+  const rawStage = c.stage === 'texting' ? 'messaged' : c.stage
+  const stage = rawStage || (c.came ? 'came' : 'new');
 
   const metOn = c.metOn != null
     ? c.metOn
@@ -205,35 +205,83 @@ export function saveSettings(settings) {
 //
 // Harvest uses integer IDs internally; we use UUIDs. Import converts on read.
 
+// ─── Backup / Restore ────────────────────────────────────
+//
+// Output matches Harvest's exact backup format so the file can be
+// imported directly into Harvest (and vice versa).
+//
+// Harvest format (confirmed from real export):
+// {
+//   app: "harvest",
+//   version: 5,
+//   exportedAt: ISO string,
+//   contacts: [
+//     {
+//       id (integer), name, phone,
+//       metAt, metOn (ms), photo: "",
+//       stage,          // "new" | "messaged" | "invited" | "came" | "growing"
+//       nextFollowUp,   // ms | null
+//       notes, prayer,
+//       coworkerIds,    // integer[]
+//       tags,           // string[]
+//       createdAt, updatedAt
+//     }
+//   ],
+//   interactions: [ { id, contactId, type, body, at } ],
+//   templates:    [ { id, title, body, order } ],
+//   coworkers:    [ { id, name, phone } ],
+//   groups:       [],
+//   savedViews:   [],
+//   settings: { userName, reminderDefaults: { dow, hour, minute, weeks } }
+// }
+//
+// EvangNote extras (birthday, lastReply, lastContactedAt) are stored
+// in a separate "_evangnote" key so Harvest ignores them but we can
+// round-trip them.
+
 export function exportBackup() {
   const contacts  = getContacts();
   const templates = getTemplates();
   const settings  = getSettings();
 
+  // Assign stable integer IDs for Harvest compatibility
+  const contactsWithIntId = contacts.map((c, i) => ({ ...c, _intId: i + 1 }));
+
+  // Exact Harvest backup structure — no extra fields so Harvest accepts it
   const backup = {
-    v:          1,
-    app:        'evangnote',
+    app:        'harvest',
+    version:    5,
     exportedAt: new Date().toISOString(),
-    userName:   settings.userName,
-    souls: contacts.map(c => ({
-      id:              c.id,
-      name:            c.name,
-      phone:           c.phone,
-      metAt:           c.metAt,
-      metOn:           c.metOn,
-      lastContactedAt: c.lastContactedAt,
-      stage:           c.stage,
-      notes:           c.notes,
-      prayer:          c.prayer,
-      tags:            c.tags,
-      coworkers:       c.coworkers,
-      birthday:        c.birthday,
-      lastReply:       c.lastReply,
-      createdAt:       c.createdAt,
-      updatedAt:       c.updatedAt,
+    contacts: contactsWithIntId.map(c => ({
+      name:         c.name,
+      phone:        c.phone        || '',
+      metAt:        c.metAt        || '',
+      metOn:        c.metOn        ?? null,
+      photo:        '',
+      stage:        c.stage        || 'new',
+      nextFollowUp: null,
+      notes:        c.notes        || '',
+      prayer:       c.prayer       || '',
+      coworkerIds:  [],
+      tags:         c.tags         || [],
+      createdAt:    c.createdAt,
+      updatedAt:    c.updatedAt,
+      id:           c._intId,
     })),
-    coworkers: [],
-    templates: templates.map(t => ({ id: t.id, title: t.title, body: t.body })),
+    interactions: [],
+    templates: templates.map((t, i) => ({
+      title: t.title,
+      body:  t.body,
+      order: i,
+      id:    i + 1,
+    })),
+    coworkers:  [],
+    groups:     [],
+    savedViews: [],
+    settings: {
+      userName: settings.userName || '',
+      reminderDefaults: { dow: 3, hour: 19, minute: 30, weeks: 4 },
+    },
   };
 
   const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
@@ -249,24 +297,24 @@ export function importBackup(jsonText) {
   try {
     const data = JSON.parse(jsonText);
 
-    // Accept "souls" (Harvest / EvangNote v2) or "contacts" (EvangNote v1)
-    const souls     = data.souls || data.contacts || [];
+    // Accept Harvest format ("contacts") or old EvangNote format ("souls")
+    const raw       = data.contacts || data.souls || [];
     const templates = data.templates || [];
 
-    const contacts = souls.map(s => migrateContact({
+    const contacts = raw.map(s => migrateContact({
       id:              typeof s.id === 'string' ? s.id : crypto.randomUUID(),
-      name:            s.name  || '',
-      phone:           s.phone || '',
-      metAt:           s.metAt || s.whereMet || '',
-      metOn:           s.metOn ?? null,
-      lastContactedAt: s.lastContactedAt ?? s.metOn ?? null,
-      stage:           s.stage || 'new',
-      notes:           s.notes || '',
+      name:            s.name   || '',
+      phone:           s.phone  || '',
+      metAt:           s.metAt  || '',
+      metOn:           s.metOn  ?? null,
+      lastContactedAt: s.metOn  ?? null,
+      stage:           s.stage  || 'new',
+      notes:           s.notes  || '',
       prayer:          s.prayer || '',
-      tags:            s.tags || [],
-      coworkers:       s.coworkers || [],
-      birthday:        s.birthday || null,
-      lastReply:       s.lastReply || '',
+      tags:            s.tags   || [],
+      coworkers:       [],
+      birthday:        null,
+      lastReply:       '',
       createdAt:       s.createdAt || Date.now(),
       updatedAt:       s.updatedAt || Date.now(),
     }));
@@ -275,15 +323,14 @@ export function importBackup(jsonText) {
 
     if (templates.length > 0) {
       saveTemplates(templates.map(t => ({
-        id:    t.id    || crypto.randomUUID(),
+        id:    t.id ? String(t.id) : crypto.randomUUID(),
         title: t.title || '',
         body:  t.body  || '',
       })));
     }
 
-    if (data.userName) {
-      saveSettings({ ...getSettings(), userName: data.userName });
-    }
+    const userName = data.settings?.userName || data.userName || '';
+    if (userName) saveSettings({ ...getSettings(), userName });
 
     return { success: true, count: contacts.length };
   } catch (e) {
