@@ -158,7 +158,9 @@ export default function ContactList() {
   }
 
   async function syncFromContacts() {
-    if (typeof navigator.contacts?.select !== 'function') {
+    const hasContacts = typeof navigator.contacts?.select === 'function'
+    if (!hasContacts) {
+      alert(`Debug: navigator.contacts = ${navigator.contacts}, type = ${typeof navigator.contacts}`)
       showToast('Open in iPhone Safari to use Sync', 'error'); return
     }
     setSyncing(true)
