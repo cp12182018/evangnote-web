@@ -230,7 +230,7 @@ export default function ContactList() {
                       <button className="menu-item" onClick={() => { setMenuOpen(false); vcfInputRef.current.click() }}>📇 Import .vcf (iPhone Contacts)</button>
                       <button className="menu-item" onClick={() => { setMenuOpen(false); csvInputRef.current.click() }}>📊 Import .csv</button>
                       <button className="menu-item" onClick={() => { setMenuOpen(false); bkpInputRef.current.click() }}>📥 Restore backup</button>
-                      <button className="menu-item" onClick={() => { setMenuOpen(false); exportBackup() }}>📤 Export backup</button>
+                      <button className="menu-item" onClick={() => { setMenuOpen(false); exportBackup() }}>🌾 Sync to Harvest</button>
                       <div style={{ borderTop: '1px solid #e5e7eb', margin: '4px 0' }} />
                       <button className="menu-item danger" onClick={() => { setMenuOpen(false); setConfirm({ type: 'all' }) }}>🗑 Delete All</button>
                     </div>
