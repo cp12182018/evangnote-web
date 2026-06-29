@@ -134,10 +134,19 @@ export default function ContactList() {
     reader.onload = ev => {
       const parsed = parseCsv(ev.target.result)
       const toAdd  = parsed.map(p => ({
-        id: crypto.randomUUID(), name: p.name, phone: p.phone || '',
-        metAt: '', metOn: null, lastContactedAt: null,
-        stage: 'new', notes: '', prayer: '', tags: [], coworkers: [],
-        birthday: null, lastReply: '',
+        id: crypto.randomUUID(),
+        name:            p.name,
+        phone:           p.phone   || '',
+        metAt:           p.metAt   || '',
+        metOn:           p.metOn   ?? null,
+        lastContactedAt: p.metOn   ?? null,
+        stage:           p.stage   || 'new',
+        notes:           p.notes   || '',
+        prayer:          p.prayer  || '',
+        tags:            p.tags    || [],
+        coworkers:       [],
+        birthday:        p.birthday || null,
+        lastReply:       p.metOn ? 'Waiting' : '',
         createdAt: Date.now(), updatedAt: Date.now(),
       }))
       runImport(toAdd, '.csv')
@@ -179,6 +188,26 @@ export default function ContactList() {
     } catch (e) {
       if (e.name !== 'AbortError') showToast('Sync failed. Try again.', 'error')
     } finally { setSyncing(false) }
+  }
+
+  // ── CSV template download ──
+  function downloadCsvTemplate() {
+    const csv = [
+      'name,phone,met_at,met_on,stage,notes,prayer,tags,birthday',
+      '# stage: new | messaged | invited | came | growing',
+      '# met_on and birthday: MM/DD/YYYY format',
+      '# tags: separate multiple with semicolon e.g. Park;Spanish',
+      'Jane Smith,6461234567,33rd St & 7th Ave,06/28/2026,messaged,Talked about faith and family,Pray for her mom\'s health,Park;English,03/15/1995',
+      'Michael Lee,9171234567,K-Town Starbucks,06/15/2026,invited,Interested in Bible study — will try to come Thursday,,Spanish,',
+      'Sarah Chen,,Newport PATH station,06/20/2026,new,Very open conversation,,,12/01/1998',
+    ].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = 'evangnote-import-template.csv'
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   // ── Stage pill ──
@@ -229,6 +258,7 @@ export default function ContactList() {
                     <div className="menu-dropdown">
                       <button className="menu-item" onClick={() => { setMenuOpen(false); vcfInputRef.current.click() }}>📇 Import .vcf (iPhone Contacts)</button>
                       <button className="menu-item" onClick={() => { setMenuOpen(false); csvInputRef.current.click() }}>📊 Import .csv</button>
+                      <button className="menu-item" onClick={() => { setMenuOpen(false); downloadCsvTemplate() }}>📋 Download CSV template</button>
                       <button className="menu-item" onClick={() => { setMenuOpen(false); bkpInputRef.current.click() }}>📥 Restore backup</button>
                       <button className="menu-item" onClick={() => { setMenuOpen(false); exportBackup() }}>🌾 Sync to Harvest</button>
                       <div style={{ borderTop: '1px solid #e5e7eb', margin: '4px 0' }} />
