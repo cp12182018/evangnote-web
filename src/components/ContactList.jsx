@@ -158,11 +158,8 @@ export default function ContactList() {
   }
 
   async function syncFromContacts() {
-    const hasContacts = typeof navigator.contacts?.select === 'function'
-    if (!hasContacts) {
-      alert(`Debug: navigator.contacts = ${navigator.contacts}, type = ${typeof navigator.contacts}`)
-      showToast('Open in iPhone Safari to use Sync', 'error'); return
-    }
+    showToast('Contact Picker not supported on iPhone. Use Import .vcf instead.', 'error')
+    return
     setSyncing(true)
     try {
       const picked = await navigator.contacts.select(['name', 'tel'], { multiple: true })
@@ -226,15 +223,11 @@ export default function ContactList() {
               <button className="btn btn-ghost" onClick={() => setEditMode(true)}>Edit</button>
               <span className="header-title">EvangNote</span>
               <div style={{ display: 'flex', gap: 4 }}>
-                <button className="btn-icon" onClick={syncFromContacts} disabled={syncing}
-                  title="Sync from iPhone Contacts" style={{ opacity: syncing ? 0.5 : 1 }}>
-                  {syncing ? '⏳' : '🔄'}
-                </button>
                 <div className="menu-wrap" ref={menuRef}>
                   <button className="btn-icon" onClick={() => setMenuOpen(v => !v)} title="More">⋯</button>
                   {menuOpen && (
                     <div className="menu-dropdown">
-                      <button className="menu-item" onClick={() => { setMenuOpen(false); vcfInputRef.current.click() }}>📇 Import .vcf</button>
+                      <button className="menu-item" onClick={() => { setMenuOpen(false); vcfInputRef.current.click() }}>📇 Import .vcf (iPhone Contacts)</button>
                       <button className="menu-item" onClick={() => { setMenuOpen(false); csvInputRef.current.click() }}>📊 Import .csv</button>
                       <button className="menu-item" onClick={() => { setMenuOpen(false); bkpInputRef.current.click() }}>📥 Restore backup</button>
                       <button className="menu-item" onClick={() => { setMenuOpen(false); exportBackup() }}>📤 Export backup</button>
